@@ -23,7 +23,7 @@ window_size = 50
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
 
 data_dir = "all_data/binance"
-required_length = 21 * 24 * 60  # 7 days × 24 hours × 60 minutes = 30240
+required_length = 5 * 24 * 60  # 5 days × 24 hours × 60 minutes = 30240
 
 # Step 1: Read symbols from symbols_used.txt
 with open("symbols_used.txt", "r") as f:
@@ -87,7 +87,7 @@ with tf.device('/device:CPU:0'):
         data= tf.expand_dims(data,axis=0)
         preds=model(data,training=False)
         
-        idx=tf.argmax(preds)
+        idx=tf.argmax(preds[0])
         # tf.print("Predicted index:", idx)
         
         return tf.constant(data[idx,-1,3])
@@ -155,7 +155,7 @@ with tf.device('/device:CPU:0'):
     # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
     # @tf.function
     def train_step(inp,target,infer):
-        
+        inp=tf.expand_dims(inp,axis=0)
         with tf.GradientTape() as tape:
             preds = net(inp)
             loss = loss_trader(infer,target)  # Proper use of TF loss function
