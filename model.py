@@ -62,14 +62,22 @@ for symbol in ordered_symbols:
 
 # Step 4: Stack into final array
 data = np.stack(data_arrays,dtype=np.float16)
-
-print("Imported & processed")
+del df
+del data_arrays
+del ordered_symbols
+del symbol_to_file
+del all_files
+del file_path
+del start_time
+import gc
+gc.collect()
+print("Imported & processed, memory free")
 # print("Symbols order:", symbols_order)
 
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
 #                                      Declare The Thing (1982)
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
-with tf.device('/device:GPU:0'):
+with tf.device('/device:CPU:0'):
     def loss_trader(pred,pred_prev):
         # loss = pred-pred_prev
 
@@ -114,8 +122,8 @@ with tf.device('/device:GPU:0'):
         
         x2 = tcn_layer(inputs, 4*n, (5,5))
         
-        neck1 = tcn_layer(x1, n//5, (2,2))
-        neck2 = tcn_layer(x2, n//5, (2,2))
+        neck1 = tcn_layer(x1, n, (2,2))
+        neck2 = tcn_layer(x2, n, (2,2))
         
         mix = tf.keras.layers.Add()([neck1, neck2])
         mix = tf.keras.layers.Dense(5,'elu')(mix)
@@ -128,7 +136,7 @@ with tf.device('/device:GPU:0'):
         return tf.keras.Model(inputs, out)
 
     # Build model
-    net = build_model(64,(np.shape(data)[0],window_size,np.shape(data)[2]))
+    net = build_model(2,(np.shape(data)[0],window_size,np.shape(data)[2]))
     net.summary()
 
     # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
