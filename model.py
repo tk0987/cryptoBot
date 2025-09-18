@@ -1,4 +1,3 @@
-'''not ready yet'''
 # data format: df[["timestamp", "open", "high", "low", "close", "volume"]]
 
 import numpy as np
@@ -14,7 +13,7 @@ import numpy as np
 r.seed(datetime.now().timestamp())
 
 # Define global variables
-window_size = 50
+window_size = 10
 # batch_size = 64
 
 
@@ -23,7 +22,7 @@ window_size = 50
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
 
 data_dir = "all_data/binance"
-required_length = 5 * 24 * 60  # 5 days × 24 hours × 60 minutes = 30240
+required_length = 3 * 60  # 5 days × 24 hours × 60 minutes = 30240
 
 # Step 1: Read symbols from symbols_used.txt
 with open("symbols_used.txt", "r") as f:
@@ -77,20 +76,35 @@ print("Imported & processed, memory free")
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
 #                                      Declare The Thing (1982)
 # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
+global prev_pred
+prev_pred=tf.zeros([np.shape(data)[0]], dtype=tf.float16)
 with tf.device('/device:CPU:0'):
-    def loss_trader(pred,pred_prev):
-        # loss = pred-pred_prev
+    def loss_trader(model_output, input_data):
+        """
+        model_output: shape (1, num_symbols) — softmax weights
+        input_data: shape (1, num_symbols, window_size, 5) — full input batch
+        """
+        global prev_pred
+        weights = tf.cast(tf.squeeze(model_output), tf.float16)  # shape: (num_symbols,)
+        weights_prev=tf.cast(tf.squeeze(prev_pred), tf.float16)
+        # close_prices =   # shape: (num_symbols,) — last timestep "close" values
 
-        return -(pred - pred_prev)
+        weighted_pred = tf.reduce_sum(weights * input_data[0,:, -1, 3])
+        weighted_prev=tf.reduce_sum(weights_prev * input_data[0,:, -2, 3])
 
-    def inference(data,model):
-        data= tf.expand_dims(data,axis=0)
-        preds=model(data,training=False)
+        # You can define your target however you like — for example:
+        # target = tf.reduce_mean(close_prices)  # or use actual future value if available
+
+        return -tf.subtract(weighted_pred, weighted_prev)
+
+    # def inference(data,model):
+    #     data= tf.expand_dims(data,axis=0)
+    #     preds=model(data,training=False)
         
-        idx=tf.argmax(preds[0])
-        # tf.print("Predicted index:", idx)
+    #     idx=tf.argmax(preds[0])
+    #     # tf.print("Predicted index:", idx)
         
-        return tf.constant(data[idx,-1,3])
+    #     return tf.constant(data[0,idx,-1,3])
     
     # def minmax_normalization(data):
     #     return (data - np.min(data)) / (np.max(data) -np.min(data))
@@ -129,8 +143,10 @@ with tf.device('/device:CPU:0'):
         mix = tf.keras.layers.Dense(5,'elu')(mix)
         mix = transformer_encoder(mix,shape[0],8,7)
         mix = tf.keras.layers.Flatten()(mix)  # Ensure correct output shape
+        mix = tf.keras.layers.Dense(shape[0]//12,activation='elu')(mix)
+        mix = tf.keras.layers.Dense(shape[0]//6,activation='elu')(mix)
 
-        out = tf.keras.layers.Dense(shape[0],'softmax')(mix)  # No activation for regression output
+        out = tf.keras.layers.Dense(shape[0],activation='softmax')(mix)  # No activation for regression output
         # print(out)
 
         return tf.keras.Model(inputs, out)
@@ -154,29 +170,33 @@ with tf.device('/device:CPU:0'):
     #                                           Training Loop
     # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
     # @tf.function
-    def train_step(inp,target,infer):
+    
+    def train_step(inp):
+        global prev_pred
         inp=tf.expand_dims(inp,axis=0)
         with tf.GradientTape() as tape:
             preds = net(inp)
-            loss = loss_trader(infer,target)  # Proper use of TF loss function
+            loss = loss_trader(preds,inp)  # Proper use of TF loss function
         grads = tape.gradient(loss, net.trainable_variables)
-        # grads = [tf.clip_by_value(g, -1.0, 1.0) for g in grads]  # Gradient clipping for stability
         opti.apply_gradients(zip(grads, net.trainable_variables))
-        return loss
+        return [loss,preds]
 
     epoch = 0
     best_loss = float('inf')
-    prev_pred=tf.constant(0)
-    pred=tf.constant(0)
+    
+    # pred=tf.constant([0.0]*5)
 
     while True:
         epoch_loss = 0.0
         for i in tqdm(range(len(data[0]) - window_size)):
             batch_inp = data[:, i:i+window_size, :]
-            target = data[:, i+window_size, 3]  # "close" value
-            pred = inference(batch_inp, net)
-            batch_loss = train_step(batch_inp, target, pred)
-            epoch_loss += batch_loss.numpy()
+            # target = data[:, i+window_size, 3]  # "close" value
+            # pred = inference(batch_inp, net)
+            # print(pred)
+            batch_loss = train_step(batch_inp)
+            prev_pred=batch_loss[1]
+            epoch_loss += batch_loss[0].numpy()
+            # pred_prev=target
 
 
         print(f"Epoch {epoch + 1}, Loss = {epoch_loss:.6f}")
