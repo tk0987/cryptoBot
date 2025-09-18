@@ -76,12 +76,13 @@ with tf.device('/device:GPU:0'):
         return -(pred - pred_prev)
 
     def inference(data,model):
+        data= tf.expand_dims(data,axis=0)
         preds=model(data,training=False)
         
         idx=tf.argmax(preds)
         # tf.print("Predicted index:", idx)
         
-        return tf.constant(data[idx,:,3])
+        return tf.constant(data[idx,-1,3])
     
     # def minmax_normalization(data):
     #     return (data - np.min(data)) / (np.max(data) -np.min(data))
@@ -144,7 +145,7 @@ with tf.device('/device:GPU:0'):
     # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
     #                                           Training Loop
     # +++++++++++++++++++++++++++++==============================================+++++++++++++++++++++++++++++
-    @tf.function
+    # @tf.function
     def train_step(inp,target,infer):
         
         with tf.GradientTape() as tape:
@@ -157,20 +158,18 @@ with tf.device('/device:GPU:0'):
 
     epoch = 0
     best_loss = float('inf')
-    prev_pred=0
+    prev_pred=tf.constant(0)
+    pred=tf.constant(0)
 
     while True:
         epoch_loss = 0.0
         for i in tqdm(range(len(data[0]) - window_size)):
-            try:
-                batch_inp = data[:,i:i+window_size, :]
-                pred=inference(batch_inp,net)
-                # tf.print(pred)
-                batch_loss = train_step(batch_inp, prev_pred,pred)
-                epoch_loss += batch_loss
-                pred_prev=pred
-            except ValueError as e:
-                break 
+            batch_inp = data[:, i:i+window_size, :]
+            target = data[:, i+window_size, 3]  # "close" value
+            pred = inference(batch_inp, net)
+            batch_loss = train_step(batch_inp, target, pred)
+            epoch_loss += batch_loss.numpy()
+
 
         print(f"Epoch {epoch + 1}, Loss = {epoch_loss:.6f}")
 
