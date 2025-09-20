@@ -1,4 +1,4 @@
-# unfinished pig-free kosher version
+# unfinished sanitized version
 import numpy as np
 import tensorflow as tf
 import pandas as pd
@@ -18,8 +18,8 @@ tf.random.set_seed(int(datetime.now().timestamp()) % 2**32)
 # -----------------------
 # Global constants
 # -----------------------
-window_size = 10
-initial_cash = 10.0
+window_size = 14
+initial_cash = 100.0
 data_dir = "all_data/binance"
 required_length = 3 * 60  # 3 hours for testing (adjust as needed)
 
@@ -65,11 +65,30 @@ gc.collect()
 # -----------------------
 # Model building blocks
 # -----------------------
+def lstm(inp, howmany, n):
+    x_sum = None
+    N, S = None, None
+
+    for i in range(howmany):
+        if i == 0:
+            x, N, S = tf.keras.layers.LSTM(n, return_sequences=True, return_state=True)(inp[0])
+        else:
+            x, N, S = tf.keras.layers.LSTM(n, return_sequences=True, return_state=True)(inp[0], initial_state=[N, S])
+
+        # Accumulate the outputs
+        if x_sum is None:
+            x_sum = x
+        else:
+            x_sum = tf.keras.layers.Add()([x_sum, x])
+
+    return tf.keras.layers.Lambda(lambda x: tf.expand_dims(x, axis=0))(x_sum)
+
+
 def tcn_layer(x, filters, dilation_rate):
-    x1 = tf.keras.layers.Conv2D(filters, kernel_size=(3, 3), padding="same", activation="relu",
+    x1 = tf.keras.layers.Conv2D(filters, kernel_size=(3, 3), padding="same", activation="elu",
                                 dilation_rate=dilation_rate)(x)
     x1 = tf.keras.layers.Dense(filters, activation="elu")(x1)
-    x2 = tf.keras.layers.Conv2D(filters, kernel_size=(1, 1), padding="same", activation="relu")(x)
+    x2 = tf.keras.layers.Conv2D(filters, kernel_size=(1, 1), padding="same", activation="elu")(x)
     return tf.keras.layers.Add()([x1, x2])
 
 def transformer_encoder(inputs, embed_dim, num_heads, ff_dim):
@@ -85,21 +104,21 @@ def transformer_encoder(inputs, embed_dim, num_heads, ff_dim):
 
 def build_model(n, shape):
     inputs = tf.keras.Input(shape)
-    x = transformer_encoder(inputs, shape[0], 8, 7)
+    # x = transformer_encoder(inputs, shape[0], 8, 7)
 
-    x1 = tcn_layer(x, 4 * n, (5, 5))
-    x2 = tcn_layer(x, 4 * n, (5, 5))
+    x = lstm(inputs, 16,64 * n)
+    # x2 = tcn_layer(inputs, 4 * n, (5, 5))
 
-    neck1 = tcn_layer(x1, n, (2, 2))
-    neck2 = tcn_layer(x2, n, (2, 2))
+    # x= lstm(x, 8,n//2)
+    # neck2 = tcn_layer(x2, n, (2, 2))
 
-    x = tf.keras.layers.Add()([neck1, neck2])
-    x = tf.keras.layers.Dense(5, activation='elu')(x)
-    x = transformer_encoder(x, shape[0], 8, 7)
+    
+    x = tf.keras.layers.Dense(shape[0]//6, activation='elu')(x)
+    # x = transformer_encoder(x, shape[0], 8, 7)
     x = tf.keras.layers.Flatten()(x)
-    x = tf.keras.layers.Dense(shape[0] // 12, activation='sigmoid')(x)
-    x = tf.keras.layers.Dense(shape[0] // 6, activation='relu')(x)
-    outputs = tf.keras.layers.Dense(shape[0], activation='softmax')(x)
+    x = tf.keras.layers.Dense(shape[0] // 12, activation='elu')(x)
+    x = tf.keras.layers.Dense(shape[0] // 6, activation='elu')(x)
+    outputs = tf.keras.layers.Dense(shape[0], activation='sigmoid')(x)
 
     return tf.keras.Model(inputs, outputs)
 
@@ -110,25 +129,57 @@ def loss_trader(model_output, input_data, prev_value, holdings, cash):
     close_prices = input_data[0, :, -1, 3]  # shape: (num_assets,)
     weights = tf.squeeze(model_output)     # shape: (num_assets,)
 
+    # 📌 Portfolio value
     portfolio_value = cash + tf.reduce_sum(holdings * close_prices)
 
-    target_alloc = weights * portfolio_value
+    # ✅ Confident trading mask (weights ≥ 0.5)
+    trade_mask = tf.cast(weights >= 0.5, tf.float32)
+    conf_weights = weights * trade_mask
+
+    # ✅ Normalize confident weights (if any)
+    weight_sum = tf.reduce_sum(conf_weights)
+    safe_weights = tf.cond(
+        weight_sum > 0,
+        lambda: conf_weights / weight_sum,
+        lambda: conf_weights  # all zeros, no trades
+    )
+
+    # 📌 Allocation logic
+    target_alloc = safe_weights * portfolio_value
     current_alloc = holdings * close_prices
     delta_alloc = target_alloc - current_alloc
     delta_qty = delta_alloc / close_prices
 
     new_holdings = holdings + delta_qty
     trade_cost = tf.reduce_sum(delta_qty * close_prices)
-    new_cash = cash - trade_cost
 
+    # 💰 Fee calculation
+    fee_rate = 0.001  # 0.1% Binance trading fee
+    trade_volume = tf.reduce_sum(tf.abs(delta_qty * close_prices))
+    fees = fee_rate * trade_volume
+
+    new_cash = cash - trade_cost - fees
     new_value = new_cash + tf.reduce_sum(new_holdings * close_prices)
-    reward = new_value - prev_value
 
-    # ✅ Update in-place
+    reward = 100*(new_value - prev_value)-portfolio_value
+
+    # 🚫 Penalty for weights > 0.3
+    penalty_overweight = tf.reduce_sum(tf.nn.relu(weights - 0.3))
+    penalty_strength = 10.0
+    reward -= penalty_strength * penalty_overweight
+
+    # 🚫 Penalty if all weights < 0.5
+    max_weight = tf.reduce_max(weights)
+    penalty_low_conf = tf.nn.relu(0.5 - max_weight)
+    reward -= penalty_strength * penalty_low_conf
+
+    # 🔄 Update state
     prev_value.assign(new_value)
     holdings.assign(new_holdings)
 
     return -reward, holdings, new_cash, new_value
+
+
 
 
 
